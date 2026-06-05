@@ -1,6 +1,7 @@
 #include "CommandHandler.h"
-#include <algorithm>  
-
+#include <algorithm>
+#include <sstream>  
+using std::string;
 
 string CommandHandler::execute(const string command) {
     std::istringstream iss(command);
