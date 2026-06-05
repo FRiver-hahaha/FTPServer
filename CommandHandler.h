@@ -17,7 +17,6 @@ using std::string;
 using hash_map = std::unordered_map<std::string, std::string>;
 using cmdFunc = std::function<std::string(const std::string&)>;
 
-// 新增：FTP 命令处理器（简化版本，主要命令在 Server 中处理）
 class CommandHandler {
 
     using cmdFunc = std::function<string (const string&)>;
