@@ -74,6 +74,27 @@ string Client::sendFtpCommand(const string& command) {
     return "链接已被服务器关闭";
 }
 
+bool Client::portMode() {
+    dataSocket = socket(AF_INET, SOCK_STREAM, 0);
+    
+    struct sockaddr_in addr;
+    addr.sin_family = AF_INET;
+    addr.sin_addr.s_addr = INADDR_ANY;
+    addr.sin_port = 0; 
+    bind(dataSocket, (struct sockaddr*)&addr, sizeof(addr));
+    listen(dataSocket, 1);
+
+    // 获取实际分配的端口
+    socklen_t len = sizeof(addr);
+    getsockname(dataSocket, (struct sockaddr*)&addr, &len);
+    int port = ntohs(addr.sin_port);
+
+    string cmd = "PORT 127,0,0,1," + std::to_string(port/256) + "," + std::to_string(port%256);
+    sendFtpCommand(cmd);
+    return true;
+}
+
+
 bool Client::pasvMode() {
     string response = sendFtpCommand("PASV");
     
@@ -101,16 +122,14 @@ bool Client::pasvMode() {
     return true;
 }
 
-string Client::listFiles() {
-    // 先进入被动模式，获取数据端口
+string Client::listFilesPassive() {
     if(!pasvMode()) {
-        return "无法进入被动模式";
+        return "无法进入被动模式\n";
     }
     
-    // 先连接到数据端口（在发送 LIST 之前）
     dataSocket = socket(AF_INET, SOCK_STREAM, 0);
     if(dataSocket < 0) {
-        return "无法创建数据套接字";
+        return "无法创建数据套接字\n";
     }
     
     struct sockaddr_in dataAddr;
@@ -119,18 +138,15 @@ string Client::listFiles() {
     dataAddr.sin_port = htons(pasvPort);
     inet_pton(AF_INET, pasvHost.c_str(), &dataAddr.sin_addr);
     
-    // 连接到服务器告知的 PASV 端口
     if(connect(dataSocket, (struct sockaddr*)&dataAddr, sizeof(dataAddr)) < 0) {
         close(dataSocket);
         dataSocket = -1;
-        return "无法连接到数据端口 " + pasvHost + ":" + std::to_string(pasvPort);
+        return "无法连接到数据端口 " + pasvHost + ":" + std::to_string(pasvPort) + "\n";
     }
     
-    // 发送 LIST 命令（不读取响应，稍后手动读取）
     string cmd = "LIST\r\n";
     send(clientSocket, cmd.c_str(), cmd.length(), 0);
     
-    // 读取 150 响应
     char buffer[SIZE_BUFFER];
     memset(buffer, 0, sizeof(buffer));
     int bytesReceived = recv(clientSocket, buffer, sizeof(buffer) - 1, 0);
@@ -138,20 +154,17 @@ string Client::listFiles() {
     if(bytesReceived > 0) {
         buffer[bytesReceived] = '\0';
         response = buffer;
-        // 移除末尾的\r\n
         while(!response.empty() && (response.back() == '\r' || response.back() == '\n')) {
             response.pop_back();
         }
     }
     
-    // 检查响应码（150 或 125 都表示准备发送）
     if(response.substr(0, 3) != "150" && response.substr(0, 3) != "125") {
         close(dataSocket);
         dataSocket = -1;
-        return "LIST 命令失败：" + response;
+        return "LIST 命令失败：" + response + "\n";
     }
     
-    // 接收目录列表
     string result = "";
     while(true) {
         memset(buffer, 0, sizeof(buffer));
@@ -162,22 +175,19 @@ string Client::listFiles() {
         result += buffer;
     }
     
-    // 关闭数据连接
     close(dataSocket);
     dataSocket = -1;
     
-    // 读取 226 完成响应（重要！防止响应堆积）
     memset(buffer, 0, sizeof(buffer));
     bytesReceived = recv(clientSocket, buffer, sizeof(buffer) - 1, 0);
     if(bytesReceived > 0) {
         buffer[bytesReceived] = '\0';
-        string finalResp = buffer;
     }
     
     return result;
 }
 
-bool Client::downloadFile(const string& filename) {
+bool Client::downloadFilePassive(const string& filename) {
     if(!pasvMode()) {
         return false;
     }
@@ -200,11 +210,9 @@ bool Client::downloadFile(const string& filename) {
         return false;
     }
     
-    // 发送 RETR 命令（不读取响应，手动读取）
     string cmd = "RETR " + filename + "\r\n";
     send(clientSocket, cmd.c_str(), cmd.length(), 0);
     
-    // 读取 150 响应
     char buffer[SIZE_BUFFER];
     memset(buffer, 0, sizeof(buffer));
     int bytesReceived = recv(clientSocket, buffer, sizeof(buffer) - 1, 0);
@@ -217,7 +225,6 @@ bool Client::downloadFile(const string& filename) {
         }
     }
     
-    // 检查响应码
     if(response.substr(0, 3) != "150") {
         cout << "RETR 命令失败：" + response << '\n';
         close(dataSocket);
@@ -225,7 +232,6 @@ bool Client::downloadFile(const string& filename) {
         return false;
     }
     
-    // 接收文件内容
     string content = "";
     while(true) {
         memset(buffer, 0, sizeof(buffer));
@@ -235,7 +241,6 @@ bool Client::downloadFile(const string& filename) {
         content.append(buffer, bytesReceived);
     }
     
-    // 关闭数据连接
     close(dataSocket);
     dataSocket = -1;
 
@@ -243,13 +248,10 @@ bool Client::downloadFile(const string& filename) {
     bytesReceived = recv(clientSocket, buffer, sizeof(buffer) - 1, 0);
     if(bytesReceived > 0) {
         buffer[bytesReceived] = '\0';
-        // 可选：打印最终响应
     }
     
-    // 清理 pasvPort 状态
     pasvPort = -1;
     
-    // 保存文件到当前目录
     std::ofstream file(filename, std::ios::binary);
     if(!file.is_open()) {
         cout << "无法创建文件：" << filename << '\n';
@@ -263,20 +265,18 @@ bool Client::downloadFile(const string& filename) {
     return true;
 }
 
-bool Client::uploadFile(const string& filename) {
-    // 读取本地文件
+bool Client::uploadFilePassive(const string& filename) {
     std::ifstream file(filename, std::ios::binary);
     if(!file.is_open()) {
         cout << "无法打开文件：" << filename << '\n';
         return false;
     }
     
-    std::stringstream buffer;
-    buffer << file.rdbuf();
-    string content = buffer.str();
+    std::stringstream fileBuffer;
+    fileBuffer << file.rdbuf();
+    string content = fileBuffer.str();
     file.close();
     
-    // 先进入被动模式
     if(!pasvMode()) {
         return false;
     }
@@ -299,11 +299,9 @@ bool Client::uploadFile(const string& filename) {
         return false;
     }
     
-    // 发送 STOR 命令（不读取响应，手动读取）
     string cmd = "STOR " + filename + "\r\n";
     send(clientSocket, cmd.c_str(), cmd.length(), 0);
     
-    // 读取 150 响应
     char respBuffer[SIZE_BUFFER];
     memset(respBuffer, 0, sizeof(respBuffer));
     int bytesReceived = recv(clientSocket, respBuffer, sizeof(respBuffer) - 1, 0);
@@ -316,7 +314,6 @@ bool Client::uploadFile(const string& filename) {
         }
     }
     
-    // 检查响应码
     if(response.substr(0, 3) != "150") {
         cout << "STOR 命令失败：" + response << '\n';
         close(dataSocket);
@@ -324,7 +321,6 @@ bool Client::uploadFile(const string& filename) {
         return false;
     }
     
-    // 发送文件内容
     size_t totalSent = 0;
     while(totalSent < content.length()) {
         ssize_t sent = send(dataSocket, content.c_str() + totalSent, 
@@ -340,23 +336,237 @@ bool Client::uploadFile(const string& filename) {
     
     cout << "已发送 " << totalSent << " 字节\n";
     
-    // 关闭数据连接
     close(dataSocket);
     dataSocket = -1;
     
-    // 读取 226 完成响应（重要！防止响应堆积）
     memset(respBuffer, 0, sizeof(respBuffer));
     bytesReceived = recv(clientSocket, respBuffer, sizeof(respBuffer) - 1, 0);
     if(bytesReceived > 0) {
         respBuffer[bytesReceived] = '\0';
-        // 可选：打印最终响应
     }
     
-    // 清理 pasvPort 状态
     pasvPort = -1;
     
     cout << "文件已上传：" << filename << '\n';
     return true;
+}
+
+string Client::listFilesActive() {
+    if(!portMode()) {
+        return "无法进入主动模式\n";
+    }
+    
+    string cmd = "LIST\r\n";
+    send(clientSocket, cmd.c_str(), cmd.length(), 0);
+    
+    char buffer[SIZE_BUFFER];
+    memset(buffer, 0, sizeof(buffer));
+    int bytesReceived = recv(clientSocket, buffer, sizeof(buffer) - 1, 0);
+    string response = "";
+    if(bytesReceived > 0) {
+        buffer[bytesReceived] = '\0';
+        response = buffer;
+        while(!response.empty() && (response.back() == '\r' || response.back() == '\n')) {
+            response.pop_back();
+        }
+    }
+    
+    if(response.substr(0, 3) != "150" && response.substr(0, 3) != "125") {
+        close(dataSocket);
+        dataSocket = -1;
+        return "LIST 命令失败：" + response + "\n";
+    }
+    
+    int dataConn = accept(dataSocket, nullptr, nullptr);
+    close(dataSocket);
+    dataSocket = -1;
+    
+    if(dataConn < 0) {
+        return "接受数据连接失败\n";
+    }
+    
+    string result = "";
+    while(true) {
+        memset(buffer, 0, sizeof(buffer));
+        bytesReceived = recv(dataConn, buffer, sizeof(buffer) - 1, 0);
+        if(bytesReceived <= 0) break;
+        
+        buffer[bytesReceived] = '\0';
+        result += buffer;
+    }
+    
+    close(dataConn);
+    
+    memset(buffer, 0, sizeof(buffer));
+    bytesReceived = recv(clientSocket, buffer, sizeof(buffer) - 1, 0);
+    if(bytesReceived > 0) {
+        buffer[bytesReceived] = '\0';
+    }
+    
+    return result;
+}
+
+bool Client::downloadFileActive(const string& filename) {
+    if(!portMode()) {
+        return false;
+    }
+    
+    string cmd = "RETR " + filename + "\r\n";
+    send(clientSocket, cmd.c_str(), cmd.length(), 0);
+    
+    char buffer[SIZE_BUFFER];
+    memset(buffer, 0, sizeof(buffer));
+    int bytesReceived = recv(clientSocket, buffer, sizeof(buffer) - 1, 0);
+    string response = "";
+    if(bytesReceived > 0) {
+        buffer[bytesReceived] = '\0';
+        response = buffer;
+        while(!response.empty() && (response.back() == '\r' || response.back() == '\n')) {
+            response.pop_back();
+        }
+    }
+    
+    if(response.substr(0, 3) != "150") {
+        cout << "RETR 命令失败：" + response << '\n';
+        close(dataSocket);
+        dataSocket = -1;
+        return false;
+    }
+    
+    int dataConn = accept(dataSocket, nullptr, nullptr);
+    close(dataSocket);
+    dataSocket = -1;
+    
+    if(dataConn < 0) {
+        cout << "接受数据连接失败\n";
+        return false;
+    }
+    
+    string content = "";
+    while(true) {
+        memset(buffer, 0, sizeof(buffer));
+        bytesReceived = recv(dataConn, buffer, sizeof(buffer), 0);
+        if(bytesReceived <= 0) break;
+        
+        content.append(buffer, bytesReceived);
+    }
+    
+    close(dataConn);
+
+    memset(buffer, 0, sizeof(buffer));
+    bytesReceived = recv(clientSocket, buffer, sizeof(buffer) - 1, 0);
+    if(bytesReceived > 0) {
+        buffer[bytesReceived] = '\0';
+    }
+    
+    std::ofstream file(filename, std::ios::binary);
+    if(!file.is_open()) {
+        cout << "无法创建文件：" << filename << '\n';
+        return false;
+    }
+    
+    file.write(content.c_str(), content.length());
+    file.close();
+    
+    cout << "文件已下载：" << filename << " (" << content.length() << " 字节)\n";
+    return true;
+}
+
+bool Client::uploadFileActive(const string& filename) {
+    std::ifstream file(filename, std::ios::binary);
+    if(!file.is_open()) {
+        cout << "无法打开文件：" << filename << '\n';
+        return false;
+    }
+    
+    std::stringstream fileBuffer;
+    fileBuffer << file.rdbuf();
+    string content = fileBuffer.str();
+    file.close();
+    
+    if(!portMode()) {
+        return false;
+    }
+    
+    string cmd = "STOR " + filename + "\r\n";
+    send(clientSocket, cmd.c_str(), cmd.length(), 0);
+    
+    char respBuffer[SIZE_BUFFER];
+    memset(respBuffer, 0, sizeof(respBuffer));
+    int bytesReceived = recv(clientSocket, respBuffer, sizeof(respBuffer) - 1, 0);
+    string response = "";
+    if(bytesReceived > 0) {
+        respBuffer[bytesReceived] = '\0';
+        response = respBuffer;
+        while(!response.empty() && (response.back() == '\r' || response.back() == '\n')) {
+            response.pop_back();
+        }
+    }
+    
+    if(response.substr(0, 3) != "150") {
+        cout << "STOR 命令失败：" + response << '\n';
+        close(dataSocket);
+        dataSocket = -1;
+        return false;
+    }
+    
+    int dataConn = accept(dataSocket, nullptr, nullptr);
+    close(dataSocket);
+    dataSocket = -1;
+    
+    if(dataConn < 0) {
+        cout << "接受数据连接失败\n";
+        return false;
+    }
+    
+    size_t totalSent = 0;
+    while(totalSent < content.length()) {
+        ssize_t sent = send(dataConn, content.c_str() + totalSent, 
+                           content.length() - totalSent, 0);
+        if(sent < 0) {
+            cout << "发送数据失败\n";
+            close(dataConn);
+            return false;
+        }
+        totalSent += sent;
+    }
+    
+    cout << "已发送 " << totalSent << " 字节\n";
+    
+    close(dataConn);
+    
+    memset(respBuffer, 0, sizeof(respBuffer));
+    bytesReceived = recv(clientSocket, respBuffer, sizeof(respBuffer) - 1, 0);
+    if(bytesReceived > 0) {
+        respBuffer[bytesReceived] = '\0';
+    }
+    
+    cout << "文件已上传：" << filename << '\n';
+    return true;
+}
+
+string Client::listFiles() {
+    if (activeMode) {
+        return listFilesActive();
+    } else {
+        return listFilesPassive();
+    }
+}
+
+bool Client::downloadFile(const string& filename) {
+    if (activeMode) {
+        return downloadFileActive(filename);
+    } else {
+        return downloadFilePassive(filename);
+    }
+}
+
+bool Client::uploadFile(const string& filename) {
+    if (activeMode) {
+        return uploadFileActive(filename);
+    } else {
+        return uploadFilePassive(filename);
+    }
 }
 
 void Client::closeDataConnection() {
@@ -379,6 +589,9 @@ void Client::microShell() {
     cout << "║  put <文件名>       - 上传文件          ║\n";
     cout << "║  cd <目录>          - 切换目录          ║\n";
     cout << "║  pwd               - 显示当前目录       ║\n";
+    cout << "║  port              - 切换到主动模式     ║\n";
+    cout << "║  pasv              - 切换到被动模式     ║\n";
+    cout << "║  mode              - 查看当前模式       ║\n";
     cout << "║  help              - 显示帮助           ║\n";
     cout << "║  quit              - 退出               ║\n";
     cout << "╚════════════════════════════════════════╝\n\n";
@@ -401,7 +614,7 @@ void Client::microShell() {
             if(result.empty()) {
                 cout << "目录为空\n";
             } else {
-                cout << result << '\n';
+                cout << result;
             }
         } else if(command.substr(0, 4) == "get ") {
             string filename = command.substr(4);
@@ -420,16 +633,23 @@ void Client::microShell() {
             sendFtpCommand("CDUP");
         } else if(command == "pwd") {
             sendFtpCommand("PWD");
+        } else if(command == "port") {
+            activeMode = true;
+            cout << "已切换到主动模式 (PORT)\n";
+        } else if(command == "pasv") {
+            activeMode = false;
+            cout << "已切换到被动模式 (PASV)\n";
+        } else if(command == "mode") {
+            cout << "当前模式：" << (activeMode ? "主动模式 (PORT)" : "被动模式 (PASV)") << '\n';
         } else if(command == "help" || command == "?") {
             sendFtpCommand("HELP");
-        } else if(command == "pasv") {
-            pasvMode();
         } else {
-            // 直接发送 FTP 命令
-            sendFtpCommand(command);
+            // 未知命令提示
+            cout << "未知命令：" << command << "（输入 help 查看帮助）\n";
         }
     }
 }
+
 
 void Client::disconnect() {
     closeDataConnection();

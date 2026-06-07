@@ -37,11 +37,14 @@ constexpr int PASV_PORT_BASE = 5000;    // 被动模式端口起始值
 struct FtpSession {
     int controlSock = -1;           // 控制连接套接字
     int dataSock = -1;              // 数据连接套接字
-    int pasvListenSock = -1;        // PASV 监听套接字（在 PASV 命令时创建）
+    int pasvListenSock = -1;        // PASV 监听套接字
     int pasvPort = -1;              // 被动模式端口
     string clientIp = "";           // 客户端 IP
     string workingDir = "/";        // 当前工作目录
     bool pasvMode = false;          // 是否被动模式
+    bool portMode = false;          // 是否主动模式
+    string portIp = "";             // 主动模式客户端 IP
+    int portPort = -1;              // 主动模式客户端端口
 };
 
 class Server {
@@ -51,6 +54,7 @@ class Server {
     int controlPort;                            // 控制端口
     int dataPort;                               // 数据端口
     std::atomic<bool> running{true};            // 运行状态
+    std::atomic<bool> shutdownFlag{false};      // 延迟关闭标志
     unique_ptr<ThreadPool> threadPool;          // 线程池
     mutex sessionMutex;                         // 会话锁
     mutex dataPortMutex;                        // 数据端口分配锁
@@ -61,41 +65,41 @@ class Server {
 public:
     Server(int controlPort = FTP_CONTROL_PORT, int dataPort = FTP_DATA_PORT);
     
-    /* 传输层封装实现 */ 
-    bool start();         // 用来监听客户端
-    void run();           // 用来建立和客户端的链接
-    void stop();          // 用来关闭连接
+    bool start();
+    void run();
+    void stop();
 
-    std::vector<string> getLocalIps();  // 获取本地 IP
+    std::vector<string> getLocalIps();
     
-    void handleClientData(int clientSock);                         // 处理客户端数据
-    void handleFtpCommand(int clientSock, const string& command);  // 处理 FTP 命令
-    void handlePasvCommand(int clientSock);                        // 处理 PASV 被动模式命令
-    void handleListCommand(int clientSock);                        // 处理 LIST 列目录命令
-    void handleRetrCommand(int clientSock, const string& filename); // 处理 RETR 下载命令
-    void handleStorCommand(int clientSock, const string& filename); // 处理 STOR 上传命令
-    void handleCwdCommand(int clientSock, const string& path);     // 处理 CWD 切换目录命令
-    void handleCdupCommand(int clientSock);                        // 处理 CDUP 返回上级命令
-    void handleShutdownCommand(int clientSock);                    // 处理 SHUTDOWN 关闭服务器命令
-
-    void sendDataToClient(int dataSock, const string& data);       // 发送数据到客户端
-    string receiveDataFromClient(int dataSock, size_t maxBytes);   // 从客户端接收数据
-    string listDirectory(const string& path);                      // 列出目录内容
-    bool saveFile(const string& path, const string& content);      // 保存文件
-    string readFile(const string& path);                           // 读取文件
-    void removeSession(int clientSock);                            // 移除会话
-    string getServerIp();                                          // 获取服务器 IP
-    string getWorkingDir(int clientSock);                          // 获取工作目录
-    int allocatePasvPort();                                        // 分配被动模式端口
-    void releasePasvPort(int port);                                // 释放被动模式端口
-
-    /* 应用层封装实现 */ 
-    void printServerInfo();  // 打印服务器信息
+    void handleClientData(int clientSock);
+    void handleFtpCommand(int clientSock, const string& command);
+    void handlePasvCommand(int clientSock);
+    void handlePortCommand(int clientSock, const string& args);
+    void handleListCommand(int clientSock);
+    void handleRetrCommand(int clientSock, const string& filename);
+    void handleStorCommand(int clientSock, const string& filename);
+    void handleCwdCommand(int clientSock, const string& path);
+    void handleCdupCommand(int clientSock);
+    void handleShutdownCommand(int clientSock);
+    int getDataConnection(int clientSock, FtpSession* session); 
     
-    // 获取私有变量的调用
+    void sendDataToClient(int dataSock, const string& data);
+    string receiveDataFromClient(int dataSock, size_t maxBytes);
+    string listDirectory(const string& path);
+    bool saveFile(const string& path, const string& content);
+    string readFile(const string& path);
+    void removeSession(int clientSock);
+    string getServerIp();
+    string getWorkingDir(int clientSock);
+    int allocatePasvPort();
+    void releasePasvPort(int port);
+
+    void printServerInfo();
+    
     bool isRunning() const {return running;};
-    int getControlPort() const {return controlPort;};  // 获取控制端口
-    int getSessionCount();                             // 获取会话数
+    int getControlPort() const {return controlPort;};
+    int getSessionCount();
+    
 
     ~Server() {
         stop();
